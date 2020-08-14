@@ -584,6 +584,7 @@ dependencies = [
  "cron",
  "csv",
  "dotenv",
+ "futures",
  "serde",
  "tiberius",
  "tracing",

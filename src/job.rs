@@ -1,12 +1,12 @@
 //! # Job
 
-use std::future::Future;
+use std::{convert::TryInto, future::Future, pin::Pin};
 
 use anyhow::Result;
 use async_std::task::sleep;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SubsecRound, Utc};
 use cron::Schedule;
-use tracing::log::info;
+use tracing::log::{info, warn};
 use uuid::Uuid;
 
 /// A schedulable `Job`.
@@ -21,7 +21,7 @@ pub struct Job<T> {
     /// A function that returns a `Future` containing this job's task
     /// so that the `Future` can be constructed and called multiple times, depending on how
     /// this `Job` will be scheduled.
-    run: Box<dyn Fn() -> Box<dyn Future<Output = Result<T>>>>,
+    run: Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<T>>>>>,
 }
 
 impl<T> Job<T> {
@@ -29,7 +29,7 @@ impl<T> Job<T> {
     pub fn new(
         priority: usize,
         schedule: Schedule,
-        run: Box<dyn Fn() -> Box<dyn Future<Output = Result<T>>>>,
+        run: Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<T>>>>>,
     ) -> Self {
         Job {
             id: Uuid::new_v4(),
@@ -42,11 +42,7 @@ impl<T> Job<T> {
 
 impl<T> std::fmt::Debug for Job<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Job")
-            .field("id", &self.id)
-            .field("run", &"Fn() -> Box<dyn Future>")
-            .field("schedule", &"cron::Schedule")
-            .finish()
+        f.debug_struct("Job").field("id", &self.id).finish()
     }
 }
 
@@ -81,26 +77,31 @@ impl JobStats {
 
 /// A job scheduler for running `Job`s that produce generic `T` values when finished.
 #[derive(Default)]
-pub struct JobScheduler<T> {
+pub struct JobScheduler<T>
+where
+    T: std::fmt::Debug,
+{
     /// The jobs that this `JobScheduler` schedules.
     jobs: Vec<Job<T>>,
     /// Statistics for the jobs that this `JobScheduler` schedules.
     job_stats: Vec<JobStats>,
-    /// The interval of time, in seconds, that this scheduler checks for
+    /// The interval of time, in milliseconds, that this scheduler checks for
     /// any jobs that it should run.
     ///
-    /// The highest precision possible is 1 second but if you don't need that level of precission,
-    /// setting this property to a higher value can lower CPU usage.
-    tick_interval_sec: u8,
+    /// Setting this property to a higher value can lower CPU usage!
+    tick_interval_ms: i64,
 }
 
-impl<T> JobScheduler<T> {
+impl<T> JobScheduler<T>
+where
+    T: std::fmt::Debug,
+{
     /// Creates a new `JobScheduler` instance.
-    pub fn new(tick_interval_sec: u8) -> Self {
+    pub fn new(tick_interval_ms: i64) -> Self {
         JobScheduler {
             jobs: Vec::new(),
             job_stats: Vec::new(),
-            tick_interval_sec,
+            tick_interval_ms,
         }
     }
 
@@ -116,26 +117,45 @@ impl<T> JobScheduler<T> {
     pub async fn start(&self) {
         info!("Scheduler starting");
 
-        loop {
-            println!("Loop!");
+        let max_miss_by_duration = Duration::milliseconds(self.tick_interval_ms);
+        let max_miss_by_seconds = max_miss_by_duration.num_seconds();
 
-            // allow a max deviation equal to scheduler's tick interval + 1 seconds:
-            let allowed_deviation_duration = Duration::seconds((self.tick_interval_sec + 1).into());
-            let allowed_deviation_seconds = allowed_deviation_duration.num_seconds();
-            let now = Utc::now();
+        loop {
+            let now = Utc::now().round_subsecs(0);
 
             let jobs: Vec<&Job<T>> = self
                 .jobs
                 .iter()
                 .filter(|j| {
-                    // if the upcoming job's execution time is within the allowed deviation,
-                    // we should run it.
-
+                    // if the upcoming execution time is ± allowed_deviation, we should run it:
                     if let Some(upcoming) =
-                        j.schedule.after(&(now - allowed_deviation_duration)).next()
+                        j.schedule.after(&(now - max_miss_by_duration)).next()
                     {
-                        let abs_deviation_seconds = (now - upcoming).num_seconds().abs();
-                        if abs_deviation_seconds <= allowed_deviation_seconds {
+                        println!("Found job that should run: {:?}", j);
+
+                        let deviation_seconds = (now - upcoming).num_seconds();
+                        let abs_deviation_seconds = deviation_seconds.abs();
+
+                        if abs_deviation_seconds > 0 {
+                            println!(
+                                "Deviated from {} job execution time by {} seconds from allowed {}! Now={}, Scheduled={}.",
+                                j.id,
+                                deviation_seconds,
+                                max_miss_by_seconds,
+                                now,
+                                upcoming
+                            );
+                            warn!(
+                                "Deviated from {} job execution time by {} seconds from allowed {}! Now={}, Scheduled={}.",
+                                j.id,
+                                deviation_seconds,
+                                max_miss_by_seconds,
+                                now,
+                                upcoming
+                            );
+                        }
+
+                        if abs_deviation_seconds <= max_miss_by_seconds {
                             return true;
                         }
                     }
@@ -143,19 +163,19 @@ impl<T> JobScheduler<T> {
                 })
                 .collect();
 
-            info!("Found some jobs that should run now: {:?}", jobs);
-            println!("Found some jobs that should run now: {:?}", jobs);
+            let job_futures: Vec<Pin<Box<dyn Future<Output = Result<T>>>>> =
+                jobs.iter().map(|j| (j.run)()).collect();
 
-            // TODO: 1. Check if any jobs have more than limit_missed_runs missed runs
-            //   and run those async tasks now with a helper fr
+            let results = futures::future::join_all(job_futures).await;
 
-            sleep(std::time::Duration::from_secs(
-                self.tick_interval_sec.into(),
+            println!("Joined all futures for a result of: {:?}", results);
+
+            sleep(std::time::Duration::from_millis(
+                self.tick_interval_ms.try_into().unwrap(),
             ))
             .await;
-            
-            info!("Tick");
-            println!("Tick");
+
+            println!("Tick\n");
         }
     }
 }
@@ -167,8 +187,8 @@ mod test {
     use std::time::Duration;
 
     /// Creates a simple worker future that waits for 1 second before finishing.
-    fn create_future_that_takes_1sec() -> Box<dyn Future<Output = Result<&'static str>>> {
-        Box::new(async {
+    fn create_future_that_takes_1sec() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
+        Box::pin(async {
             sleep(Duration::from_secs(1)).await;
             println!("Worker that takes 1sec, finished.");
             Ok("Worker that takes 1sec, finished.")
@@ -176,8 +196,8 @@ mod test {
     }
 
     /// Creates a simple worker future that waits for 5 seconds before finishing.
-    fn create_future_that_takes_5sec() -> Box<dyn Future<Output = Result<&'static str>>> {
-        Box::new(async {
+    fn create_future_that_takes_5sec() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
+        Box::pin(async {
             sleep(Duration::from_secs(5)).await;
             println!("Worker that takes 5sec, finished.");
             Ok("Worker that takes 5sec, finished.")
@@ -190,25 +210,12 @@ mod test {
     fn can_schedule_one_job() {
         println!("Trying to schedule just 1 job...");
 
-        if std::env::var("RUST_LOG").is_err() {
-            std::env::set_var("RUST_LOG", "trace");
-        }
-
-        let subscriber = tracing_subscriber::FmtSubscriber::builder()
-            // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
-            // will be written to stdout.
-            .with_max_level(tracing::Level::TRACE)
-            .finish();
-
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("setting default log subscriber failed");
-
         let job: Job<&str> = Job::new(
             0,
             "0/1 * * * * *".parse().unwrap(),
             Box::new(create_future_that_takes_1sec),
         );
-        let mut scheduler = JobScheduler::<&str>::new(1);
+        let mut scheduler = JobScheduler::<&str>::new(500);
         scheduler.add(job);
         let _output = async_std::task::block_on(scheduler.start());
     }
@@ -217,10 +224,27 @@ mod test {
     /// This uses a job scheduler tick interval of 1 second.
     #[test]
     fn can_schedule_overlapping_jobs() {
-        let job: Job<&str> = Job::new(
+        println!("Trying to schedule overlapping jobs...");
+
+        let job1: Job<&str> = Job::new(
             0,
             "0/1 * * * * *".parse().unwrap(),
             Box::new(create_future_that_takes_5sec),
         );
+        let job2: Job<&str> = Job::new(
+            0,
+            "0/1 * * * * *".parse().unwrap(),
+            Box::new(create_future_that_takes_5sec),
+        );
+        let job3: Job<&str> = Job::new(
+            0,
+            "0/1 * * * * *".parse().unwrap(),
+            Box::new(create_future_that_takes_5sec),
+        );
+        let mut scheduler = JobScheduler::<&str>::new(500);
+        scheduler.add(job1);
+        scheduler.add(job2);
+        scheduler.add(job3);
+        let _output = async_std::task::block_on(scheduler.start());
     }
 }
