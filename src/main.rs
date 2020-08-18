@@ -6,11 +6,26 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
-
 //! # MF Sellout Reporter
 //!
-//! A CRON-like service purposefully built for periodically reporting sellout data
-//! to contract research organizations (CRO's) in the health information technology industry.
+//! A CRON-like service purposefully built for periodically reporting sellout data to contract
+//! research organizations ([CRO's](https://en.wikipedia.org/wiki/Contract_research_organization))
+//! in the health information technology industry.
+//! 
+//! ## Implementation details
+//! 
+//! The mechanism for executing jobs within `mf-sellout-reporter`, is based on a `JobScheduler`
+//! which periodically check if any `Job`s should be executed.
+//! The jobs are implemented as asynchronous Rust functions which should help with 
+//! 
+//! ### Arming
+//!
+//! Internally, the `JobScheduler` holds a list of jobs, each having their own schedule.
+//! Every time a new schedule is added or removed from the scheduler's list, it updates a separate
+//! internal list of upcoming jobs that should be executed next (jobs that have the same schedule).
+//! It then sleeps until that time, in order to not consume any system resources.
+//! It also does this every time a job run finished and when the scheduler is started for the first time.
+//! This operation is called `arming`.
 
 // pub mod iqvia;
 pub mod job;
@@ -18,10 +33,23 @@ pub mod job;
 #[macro_use]
 extern crate anyhow;
 
+use anyhow::Result;
+use job::{Job, JobScheduler};
+use std::{future::Future, pin::Pin};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-fn main() -> anyhow::Result<()> {
+/// A future generator function that creates a future that takes 5 seconds to complete.
+fn five_sec_future_generator() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
+    Box::pin(async {
+        async_std::task::sleep(std::time::Duration::from_secs(5)).await;
+        println!("Worker that takes 5sec, finished.");
+        Ok("Worker that takes 5sec, finished.")
+    })
+}
+
+#[async_std::main]
+async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "trace");
     }
@@ -36,6 +64,27 @@ fn main() -> anyhow::Result<()> {
         .expect("setting default log subscriber failed");
 
     info!("Starting.");
+
+    let job1: Job<&str> = Job::new(
+        0,
+        "0/1 * * * * *".parse().unwrap(),
+        Box::new(five_sec_future_generator),
+    );
+    let job2: Job<&str> = Job::new(
+        0,
+        "0/1 * * * * *".parse().unwrap(),
+        Box::new(five_sec_future_generator),
+    );
+    let job3: Job<&str> = Job::new(
+        0,
+        "0/1 * * * * *".parse().unwrap(),
+        Box::new(five_sec_future_generator),
+    );
+    let mut scheduler = JobScheduler::<&str>::new(500);
+    scheduler.add(job1);
+    scheduler.add(job2);
+    scheduler.add(job3);
+    let output = scheduler.start().await;
 
     // let iqvia_scheduler = iqvia::IqviaJobScheduler::new();
     // iqvia_scheduler.start()

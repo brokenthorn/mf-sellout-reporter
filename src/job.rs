@@ -186,8 +186,8 @@ mod test {
     use async_std::task::sleep;
     use std::time::Duration;
 
-    /// Creates a simple worker future that waits for 1 second before finishing.
-    fn create_future_that_takes_1sec() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
+    /// A future generator function that creates a future that takes 1 second to complete.
+    fn one_sec_future_generator() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
         Box::pin(async {
             sleep(Duration::from_secs(1)).await;
             println!("Worker that takes 1sec, finished.");
@@ -195,8 +195,8 @@ mod test {
         })
     }
 
-    /// Creates a simple worker future that waits for 5 seconds before finishing.
-    fn create_future_that_takes_5sec() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
+    /// A future generator function that creates a future that takes 5 seconds to complete.
+    fn five_sec_future_generator() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
         Box::pin(async {
             sleep(Duration::from_secs(5)).await;
             println!("Worker that takes 5sec, finished.");
@@ -213,7 +213,7 @@ mod test {
         let job: Job<&str> = Job::new(
             0,
             "0/1 * * * * *".parse().unwrap(),
-            Box::new(create_future_that_takes_1sec),
+            Box::new(one_sec_future_generator),
         );
         let mut scheduler = JobScheduler::<&str>::new(500);
         scheduler.add(job);
@@ -229,17 +229,17 @@ mod test {
         let job1: Job<&str> = Job::new(
             0,
             "0/1 * * * * *".parse().unwrap(),
-            Box::new(create_future_that_takes_5sec),
+            Box::new(five_sec_future_generator),
         );
         let job2: Job<&str> = Job::new(
             0,
             "0/1 * * * * *".parse().unwrap(),
-            Box::new(create_future_that_takes_5sec),
+            Box::new(five_sec_future_generator),
         );
         let job3: Job<&str> = Job::new(
             0,
             "0/1 * * * * *".parse().unwrap(),
-            Box::new(create_future_that_takes_5sec),
+            Box::new(five_sec_future_generator),
         );
         let mut scheduler = JobScheduler::<&str>::new(500);
         scheduler.add(job1);
