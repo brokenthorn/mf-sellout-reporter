@@ -1,23 +1,23 @@
 #![forbid(unsafe_code)]
 #![forbid(deprecated_in_future)]
-#![warn(missing_docs)]
+// #![warn(missing_docs)]
 // TODO: Remove these when done:
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
+// #![allow(unused_imports)]
+// #![allow(unused_variables)]
+// #![allow(dead_code)]
 
 //! # MF Sellout Reporter
 //!
 //! A CRON-like service purposefully built for periodically reporting sellout data to contract
 //! research organizations ([CRO's](https://en.wikipedia.org/wiki/Contract_research_organization))
 //! in the health information technology industry.
-//! 
+//!
 //! ## Implementation details
-//! 
+//!
 //! The mechanism for executing jobs within `mf-sellout-reporter`, is based on a `JobScheduler`
 //! which periodically check if any `Job`s should be executed.
-//! The jobs are implemented as asynchronous Rust functions which should help with 
-//! 
+//! The jobs are implemented as asynchronous Rust functions which should help with
+//!
 //! ### Arming
 //!
 //! Internally, the `JobScheduler` holds a list of jobs, each having their own schedule.
@@ -28,14 +28,14 @@
 //! This operation is called `arming`.
 
 // pub mod iqvia;
-pub mod job;
+pub mod task;
 
-#[macro_use]
+// #[macro_use]
 extern crate anyhow;
 
 use anyhow::Result;
-use job::{Job, JobScheduler};
 use std::{future::Future, pin::Pin};
+use task::{Task, TaskScheduler};
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -65,26 +65,27 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting.");
 
-    let job1: Job<&str> = Job::new(
-        0,
+    let job1: Task<Result<&str>> = Task::new(
+        "Dummy 1",
         "0/1 * * * * *".parse().unwrap(),
         Box::new(five_sec_future_generator),
     );
-    let job2: Job<&str> = Job::new(
-        0,
+    let job2: Task<Result<&str>> = Task::new(
+        "Dummy 2",
         "0/1 * * * * *".parse().unwrap(),
         Box::new(five_sec_future_generator),
     );
-    let job3: Job<&str> = Job::new(
-        0,
+    let job3: Task<Result<&str>> = Task::new(
+        "Dummy 3",
         "0/1 * * * * *".parse().unwrap(),
         Box::new(five_sec_future_generator),
     );
-    let mut scheduler = JobScheduler::<&str>::new(500);
+    let mut scheduler = TaskScheduler::<'_, Result<&str>>::with_capacity("Main Scheduler", 3);
     scheduler.add(job1);
     scheduler.add(job2);
     scheduler.add(job3);
-    let output = scheduler.start().await;
+
+    let _output = scheduler.start().await;
 
     // let iqvia_scheduler = iqvia::IqviaJobScheduler::new();
     // iqvia_scheduler.start()
