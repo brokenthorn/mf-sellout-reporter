@@ -48,6 +48,15 @@ fn five_sec_future_generator() -> Pin<Box<dyn Future<Output = Result<&'static st
     })
 }
 
+/// A future generator function that creates a future that takes 15 seconds to complete.
+fn fifteen_sec_future_generator() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
+    Box::pin(async {
+        async_std::task::sleep(std::time::Duration::from_secs(15)).await;
+        println!("Worker that takes 15sec, finished.");
+        Ok("Worker that takes 15sec, finished.")
+    })
+}
+
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
@@ -67,25 +76,25 @@ async fn main() -> anyhow::Result<()> {
 
     let job1: Task<Result<&str>> = Task::new(
         "Dummy 1",
-        "0/1 * * * * *".parse().unwrap(),
+        "0/7 * * * * *".parse().unwrap(),
         Box::new(five_sec_future_generator),
     );
     let job2: Task<Result<&str>> = Task::new(
         "Dummy 2",
-        "0/1 * * * * *".parse().unwrap(),
+        "0/3 * * * * *".parse().unwrap(),
         Box::new(five_sec_future_generator),
     );
     let job3: Task<Result<&str>> = Task::new(
         "Dummy 3",
-        "0/1 * * * * *".parse().unwrap(),
-        Box::new(five_sec_future_generator),
+        "0/7 * * * * *".parse().unwrap(),
+        Box::new(fifteen_sec_future_generator),
     );
     let mut scheduler = TaskScheduler::<'_, Result<&str>>::with_capacity("Main Scheduler", 3);
     scheduler.add(job1);
     scheduler.add(job2);
     scheduler.add(job3);
 
-    let _output = scheduler.start().await;
+    let _output = scheduler.start(1).await;
 
     // let iqvia_scheduler = iqvia::IqviaJobScheduler::new();
     // iqvia_scheduler.start()

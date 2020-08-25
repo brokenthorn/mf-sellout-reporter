@@ -5,7 +5,7 @@ use std::{future::Future, pin::Pin};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use futures::future::join_all;
-use tracing::log::info;
+use tracing::log::{error, info};
 use uuid::Uuid;
 
 pub type TaskFuture<T> = Pin<Box<dyn Future<Output = T>>>;
@@ -92,68 +92,115 @@ where
         self.tasks.push(task);
     }
 
-    pub async fn start(&self) {
+    pub async fn start(&self, max_deviation_seconds: i64) {
         info!("Starting {:?}", self);
         println!("Starting {:?}", self);
 
+        if max_deviation_seconds < 1 {
+            error!("max_deviation_seconds is not allowed smaller than 1 seconds!");
+            println!("max_deviation_seconds is not allowed smaller than 1 seconds!");
+            return;
+        }
+
         loop {
             let now = Utc::now();
-            let max_deviation_seconds = 10;
 
-            let upcoming: Vec<(Uuid, DateTime<Utc>)> = self
+            // 1. Get the next schedules as an iterator:
+
+            let schedules_iter = self
                 .tasks
                 .iter()
-                // 1. Get the next run times of the all the tasks we manage:
+                // Get the closest next run time of the all the tasks we manage:
                 .map(|task| (task.id(), task.schedule.after(&now).next()))
+                // Filter out those tasks that have no next run time (one-shot tasks that have already ran):
+                // TODO: Write a cleanup function that removes these tasks that are one-shot and have no future run time,
+                //       and call it at the start of the loop, then remove this filter step.
                 .filter(|tpl| tpl.1.is_some())
+                // Unwrap the Option<DateTime> for the upcoming run time:
                 .map(|tpl| {
                     (
                         tpl.0,
                         tpl.1
                             .expect("The upcoming `Option<DateTime>` cannot be `None`!"),
                     )
-                })
-                // 2. Filter by the tasks that have start times within +/- `max_deviation_seconds` from now:
+                });
+
+            // 2. Pick out from the next schedules iterator, the tasks that need to be run right now:
+
+            let schedules_to_run_now: Vec<(Uuid, DateTime<Utc>)> = schedules_iter
+                .clone()
+                // Filter by the tasks that have start times within +/- `max_deviation_seconds` from now:
                 .filter(|tpl: &(Uuid, DateTime<Utc>)| {
                     (tpl.1 - now).num_seconds().abs() < max_deviation_seconds
                 })
                 .collect();
 
-            let workers: Vec<TaskFuture<T>> = self
-                .tasks
-                .iter()
-                .filter(|task| upcoming.iter().any(|u| u.0 == task.id))
-                .map(|task| (task.task_generator)())
-                .collect();
+            // 3. If no schedules were found that need to be run right now,
+            //    then sleep until the next schedule that needs to run.
+            //
+            //    If any schedules that need to run right now were found, then run them.
 
-            // 3. Start these tasks concurrently.
-            //    `futures::future::join_all` can be used with anything that implements IntoIterator.
+            if schedules_to_run_now.is_empty() {
+                let next_schedule_option: Option<DateTime<Utc>> = schedules_iter
+                    // then find the earliest schedule:
+                    .fold(None, |acc, t| {
+                        if let Some(d) = acc {
+                            if d < t.1 {
+                                Some(d)
+                            } else {
+                                Some(t.1)
+                            }
+                        } else {
+                            None
+                        }
+                    });
 
-            info!("Starting tasks: {:?}", upcoming);
-            println!("Starting tasks: {:?}", upcoming);
+                if let Some(next_schedule) = next_schedule_option {
+                    let dur = next_schedule - now;
 
-            let results = join_all(workers).await;
+                    info!(
+                        "Sleeping for {:?} until the next schedule needs to run, which is {}",
+                        dur, next_schedule
+                    );
+                    println!(
+                        "Sleeping for {:?} until the next schedule needs to run, which is {}",
+                        dur, next_schedule
+                    );
 
-            info!("Results: {:?}", results);
-            println!("Results: {:?}", results);
+                    async_std::task::sleep(
+                        dur.to_std()
+                            .expect("next_schedule shouldn't have been in the past!"),
+                    )
+                    .await;
+                } else {
+                    info!("There were no more tasks scheduled to run. Stoping scheduler.");
+                    println!("There were no more tasks scheduled to run. Stoping scheduler.");
+                    break;
+                }
+            } else {
+                info!("Starting tasks: {:?}", schedules_to_run_now);
+                println!("Starting tasks: {:?}", schedules_to_run_now);
 
-            // let job_futures: Vec<Pin<Box<dyn Future<Output = Result<T>>>>> =
-            //     jobs.iter().map(|j| (j.task_generator)()).collect();
+                // generate task futures:
+                let workers: Vec<TaskFuture<T>> = self
+                    .tasks
+                    .iter()
+                    .filter(|task| {
+                        schedules_to_run_now
+                            .iter()
+                            .any(|schedule| schedule.0 == task.id)
+                    })
+                    .map(|task| (task.task_generator)())
+                    .collect();
+                // run task futures to completion in parallel:
+                let results = join_all(workers).await;
 
-            // let results = futures::future::join_all(job_futures).await;
+                info!("Finished running tasks: {:?}", schedules_to_run_now);
+                println!("Finished running tasks: {:?}", schedules_to_run_now);
 
-            // println!("Joined all futures for a result of: {:?}", results);
-
-            // sleep(std::time::Duration::from_millis(
-            //     self.tick_interval_ms.try_into().unwrap(),
-            // ))
-            // .await;
-
-            // println!("Tick\n");
-
-            info!("Finished running tasks: {:?}", upcoming);
-            println!("Finished running tasks: {:?}", upcoming);
-            async_std::task::sleep(std::time::Duration::from_secs(5)).await;
+                info!("Results: {:?}", results);
+                println!("Results: {:?}", results);
+            }
         }
     }
 }
