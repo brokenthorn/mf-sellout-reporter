@@ -92,7 +92,7 @@ where
         self.tasks.push(task);
     }
 
-    pub async fn start(&self, max_deviation_seconds: i64) {
+    pub async fn start(&self, max_deviation_seconds: u8) {
         info!("Starting {:?}", self);
         println!("Starting {:?}", self);
 
@@ -113,9 +113,15 @@ where
                 // Get the closest next run time of the all the tasks we manage:
                 .map(|task| (task.id(), task.schedule.after(&now).next()))
                 // Filter out those tasks that have no next run time (one-shot tasks that have already ran):
-                // TODO: Write a cleanup function that removes these tasks that are one-shot and have no future run time,
-                //       and call it at the start of the loop, then remove this filter step.
-                .filter(|tpl| tpl.1.is_some())
+                // TODO: Write a cleanup function that removes these tasks that are one-shot and have no future run time, and call it at the start of the loop, then remove this filter step.
+                .filter(|tpl| {
+                    if tpl.1.is_some() {
+                        info!("Discarding one-shot task: {:?}", tpl);
+                        true
+                    } else {
+                        false
+                    }
+                })
                 // Unwrap the Option<DateTime> for the upcoming run time:
                 .map(|tpl| {
                     (
@@ -131,7 +137,7 @@ where
                 .clone()
                 // Filter by the tasks that have start times within +/- `max_deviation_seconds` from now:
                 .filter(|tpl: &(Uuid, DateTime<Utc>)| {
-                    (tpl.1 - now).num_seconds().abs() < max_deviation_seconds
+                    (tpl.1 - now).num_seconds().abs() < max_deviation_seconds.into()
                 })
                 .collect();
 
@@ -141,9 +147,9 @@ where
             //    If any schedules that need to run right now were found, then run them.
 
             if schedules_to_run_now.is_empty() {
-                let next_schedule_option: Option<DateTime<Utc>> = schedules_iter
-                    // then find the earliest schedule:
-                    .fold(None, |acc, t| {
+                // find the next earliest schedule:
+                let next_schedule_option: Option<DateTime<Utc>> =
+                    schedules_iter.fold(None, |acc, t| {
                         if let Some(d) = acc {
                             if d < t.1 {
                                 Some(d)
@@ -155,6 +161,7 @@ where
                         }
                     });
 
+                // sleep till that next earliest schedule, if found:
                 if let Some(next_schedule) = next_schedule_option {
                     let dur = next_schedule - now;
 
@@ -173,9 +180,12 @@ where
                     )
                     .await;
                 } else {
-                    info!("There were no more tasks scheduled to run. Stoping scheduler.");
-                    println!("There were no more tasks scheduled to run. Stoping scheduler.");
-                    break;
+                    let mut secs = max_deviation_seconds / 2;
+                    if secs < 1 {
+                        secs = 1;
+                    }
+
+                    async_std::task::sleep(std::time::Duration::from_secs(secs.into())).await;
                 }
             } else {
                 info!("Starting tasks: {:?}", schedules_to_run_now);
