@@ -1,31 +1,30 @@
 #![forbid(unsafe_code)]
 #![forbid(deprecated_in_future)]
-// #![warn(missing_docs)]
-// TODO: Remove these when done:
-// #![allow(unused_imports)]
-// #![allow(unused_variables)]
-// #![allow(dead_code)]
+#![warn(missing_docs)]
 
 //! # MF Sellout Reporter
 //!
-//! A CRON-like service purposefully built for periodically reporting sellout data to contract
-//! research organizations ([CRO's](https://en.wikipedia.org/wiki/Contract_research_organization))
-//! in the health information technology industry.
+//! A service purposefully built for the periodic reporting of sellout data to contract research
+//! organizations or [CRO's](https://en.wikipedia.org/wiki/Contract_research_organization)
+//! from the health information technology industry.
 //!
-//! ## Implementation details
+//! ## How does it work?
 //!
-//! The mechanism for executing jobs within `mf-sellout-reporter`, is based on a `JobScheduler`
-//! which periodically check if any `Job`s should be executed.
-//! The jobs are implemented as asynchronous Rust functions which should help with
+//! `mf-sellout-reporter` uses a task scheduler to run arbitrary jobs at periodic intervals.
 //!
-//! ### Arming
+//! It supports `cron` syntax to define the task schedules, making it easy to express time
+//! intervals, specific dates and/or periods.
 //!
-//! Internally, the `JobScheduler` holds a list of jobs, each having their own schedule.
-//! Every time a new schedule is added or removed from the scheduler's list, it updates a separate
-//! internal list of upcoming jobs that should be executed next (jobs that have the same schedule).
-//! It then sleeps until that time, in order to not consume any system resources.
-//! It also does this every time a job run finished and when the scheduler is started for the first time.
-//! This operation is called `arming`.
+//! The under-the-hood task scheduler is actually a custom async task scheduler written initially
+//! for `mf-sellout-reporter`, which aims to be as efficient as possible by sleeping in the interval
+//! between schedules, effectively consuming no CPU resources in that time, but it can miss the
+//! exact scheduled times by a few seconds, maybe more, especially if the system goes to sleep.
+//!
+//! ## How are tasks created?
+//!
+//! Tasks are hard-coded into the application binary. At the moment, there is no way of adding tasks
+//! dynamically at runtime. If you need to run your own custom tasks, you will need to code them in
+//! and recompile the application.
 
 // pub mod iqvia;
 pub mod task;
@@ -33,30 +32,32 @@ pub mod task;
 // #[macro_use]
 extern crate anyhow;
 
-use anyhow::Result;
 use std::{future::Future, pin::Pin};
+
+use anyhow::Result;
 use task::{Task, TaskScheduler};
-use tracing::{info, Level};
+use tracing::{instrument, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 /// A future generator function that creates a future that takes 5 seconds to complete.
+#[instrument]
 fn five_sec_future_generator() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
     Box::pin(async {
         async_std::task::sleep(std::time::Duration::from_secs(5)).await;
-        println!("Worker that takes 5sec, finished.");
         Ok("Worker that takes 5sec, finished.")
     })
 }
 
 /// A future generator function that creates a future that takes 15 seconds to complete.
+#[instrument]
 fn fifteen_sec_future_generator() -> Pin<Box<dyn Future<Output = Result<&'static str>>>> {
     Box::pin(async {
         async_std::task::sleep(std::time::Duration::from_secs(15)).await;
-        println!("Worker that takes 15sec, finished.");
         Ok("Worker that takes 15sec, finished.")
     })
 }
 
+#[instrument]
 #[async_std::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {

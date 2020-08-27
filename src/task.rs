@@ -5,19 +5,25 @@ use std::{future::Future, pin::Pin};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use futures::future::join_all;
-use tracing::log::{error, info};
+use tracing::{error, instrument, info};
 use uuid::Uuid;
 
+/// `Future` type for task results.
 pub type TaskFuture<T> = Pin<Box<dyn Future<Output = T>>>;
+/// Function signature type for `TaskFuture` generators.
 pub type TaskGenerator<T> = Box<dyn Fn() -> TaskFuture<T>>;
 
+/// An abstract and generic `Task` that produces a result `T`.
 pub struct Task<'a, T> {
+    /// Task ID.
     id: Uuid,
+    /// Task name.
     name: &'a str,
+    /// Task schedule.
     schedule: Schedule,
+    /// Last date and time this task was run.
     pub last: Option<DateTime<Utc>>,
-    // boxed because of the unsized nature of the dyn Fn() trait,
-    // which means it cannot be a local variable in current Rust:
+    /// A function that generates a `Future` for the completion of the task.
     pub task_generator: TaskGenerator<T>,
 }
 
@@ -31,6 +37,7 @@ impl<'a, T> std::fmt::Debug for Task<'a, T> {
 }
 
 impl<'a, T> Task<'a, T> {
+    /// Creates a new instance.
     pub fn new(name: &'a str, schedule: Schedule, task_generator: TaskGenerator<T>) -> Self {
         Task {
             id: Uuid::new_v4(),
@@ -41,15 +48,18 @@ impl<'a, T> Task<'a, T> {
         }
     }
 
+    /// Returns the task's ID.
     pub fn id(&self) -> Uuid {
         self.id
     }
 
+    /// Returns the task's name.
     pub fn name(&self) -> &str {
         self.name
     }
 }
 
+/// A scheduler for tasks that produce results of the generic type `T`.
 #[derive(Debug)]
 pub struct TaskScheduler<'a, T>
 where
@@ -64,6 +74,7 @@ impl<'a, T> TaskScheduler<'a, T>
 where
     T: std::fmt::Debug,
 {
+    /// Creates a new instance.
     pub fn new(name: &'a str) -> Self {
         TaskScheduler {
             id: Uuid::new_v4(),
@@ -72,6 +83,8 @@ where
         }
     }
 
+    /// Creates a new instance with a reserved capacity for the number of tasks in order to reduce
+    /// the number of memory allocations when adding tasks later.
     pub fn with_capacity(name: &'a str, capacity: usize) -> Self {
         TaskScheduler {
             id: Uuid::new_v4(),
@@ -80,25 +93,41 @@ where
         }
     }
 
+    /// Returns the task scheduler's ID.
     pub fn id(&self) -> Uuid {
         self.id
     }
 
+    /// Returns the task scheduler's name.
     pub fn name(&self) -> &str {
         self.name
     }
 
+    /// Adds a new task to this scheduler.
     pub fn add(&mut self, task: Task<'a, T>) {
         self.tasks.push(task);
     }
 
+    /// Starts the task scheduler asynchronously.
+    ///
+    /// Because the task scheduler aims to be very efficient, it sleeps the main thread
+    /// until the next task needs to be started, so it is not very precise
+    /// and can overshoot the wake-up time.
+    ///
+    /// In order to fix this issue, this function takes an argument called `max_deviation_seconds`,
+    /// that tells the scheduler that whenever it wakes up,
+    /// it should start all jobs that have
+    /// scheduled executions times up to a max number seconds before of after the current wake-up
+    /// time.
+    ///
+    /// * `max_deviation_seconds` - the max allowed deviation between current wake time and
+    /// scheduled job run time.
+    #[instrument]
     pub async fn start(&self, max_deviation_seconds: u8) {
         info!("Starting {:?}", self);
-        println!("Starting {:?}", self);
 
         if max_deviation_seconds < 1 {
             error!("max_deviation_seconds is not allowed smaller than 1 seconds!");
-            println!("max_deviation_seconds is not allowed smaller than 1 seconds!");
             return;
         }
 
@@ -164,16 +193,10 @@ where
                 // sleep till that next earliest schedule, if found:
                 if let Some(next_schedule) = next_schedule_option {
                     let dur = next_schedule - now;
-
                     info!(
                         "Sleeping for {:?} until the next schedule needs to run, which is {}",
                         dur, next_schedule
                     );
-                    println!(
-                        "Sleeping for {:?} until the next schedule needs to run, which is {}",
-                        dur, next_schedule
-                    );
-
                     async_std::task::sleep(
                         dur.to_std()
                             .expect("next_schedule shouldn't have been in the past!"),
@@ -189,7 +212,6 @@ where
                 }
             } else {
                 info!("Starting tasks: {:?}", schedules_to_run_now);
-                println!("Starting tasks: {:?}", schedules_to_run_now);
 
                 // generate task futures:
                 let workers: Vec<TaskFuture<T>> = self
@@ -206,10 +228,8 @@ where
                 let results = join_all(workers).await;
 
                 info!("Finished running tasks: {:?}", schedules_to_run_now);
-                println!("Finished running tasks: {:?}", schedules_to_run_now);
 
                 info!("Results: {:?}", results);
-                println!("Results: {:?}", results);
             }
         }
     }
